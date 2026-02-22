@@ -1,4 +1,4 @@
-# TW1 LND Tool
+# TW1 LND Map Editor
 
 Full viewer and editor for individual Two Worlds 1 map tiles (`.lnd` format).
 
@@ -6,8 +6,9 @@ Full viewer and editor for individual Two Worlds 1 map tiles (`.lnd` format).
 
 - **View** all 30+ sections: heightmap, color base, textures, objects, water pools, fog, flower/grass, EAX zones, passable terrain and more
 - **Export** binary map layers as PNG — 12 types including heightmap (512×512 uint16), color base (BGRA), water, fog, passable, EAX, flower/grass
-- **Edit** section data with built-in hex editor
-- **Pack/Unpack** with byte-perfect roundtrip and automatic `.bak` backup
+- **Import** PNG images to replace any map layer — swap heightmaps, color maps, texture maps, fog, EAX zones, passable terrain, etc.
+- **Save** modified LND files with automatic `.bak` backup, or **Save As** to a new file
+- **Pack/Unpack** with byte-perfect roundtrip
 - Supports both editor format (dual zlib) and SDK/game format (single zlib)
 - Dark theme UI with tree navigation
 
@@ -29,9 +30,29 @@ Or double-click `START_LND_TOOL.bat`.
 
 1. Click **Load** and select a `.lnd` file (from the SDK or extracted from the game's WD archive)
 2. Browse sections in the tree on the left
-3. Click **Export Map** on any binary map section to save as PNG
-4. Edit values in the hex view and click **Save** to write changes back
-5. Use **Pack** to recompress the modified file
+3. Select a **Binary Map** layer (e.g., Heightmap, Color Base)
+4. Click **Export PNG** to save the current map as an image
+5. Click **Import PNG** to replace the map data with a new image
+6. Click **Save** to overwrite the original file or **Save As** to write to a new file
+
+## Import Requirements
+
+When importing a PNG to replace a map layer, the image dimensions must match exactly:
+
+| Layer | Expected Size | Format |
+|-------|--------------|--------|
+| Heightmap | 512×512 | 16-bit grayscale (or 8-bit, auto-scaled) |
+| Color Base | 512×512 | RGBA (auto-converted from any format) |
+| Tex Reference | 512×512 | RGBA |
+| Tex Alpha | 512×512 | RGBA |
+| Water FarLOD | 128×128 | Grayscale (8-bit or 16-bit) |
+| Fog Reference | 128×128 | Grayscale |
+| EAX Zones | 128×128 | Grayscale (uint8 zone IDs) |
+| Flower/Grass | 128×128 | RGB (updates density channels) |
+| Stamp Map | varies | RGB (updates first 3 bytes per cell) |
+| Passable | varies | Grayscale (>0 = passable) |
+| Disabled | varies | Grayscale (>0 = disabled) |
+| Interiors | varies | Grayscale (>0 = interior) |
 
 ## Supported Sections
 
@@ -57,4 +78,5 @@ Or double-click `START_LND_TOOL.bat`.
 
 - Roundtrip verified: load → save produces byte-identical output
 - The tool auto-detects compression format (editor dual-zlib vs SDK single-zlib)
+- Saving creates a `.bak` backup of the original file automatically
 - Place the `.bat` file in the same folder as the `.py` file
