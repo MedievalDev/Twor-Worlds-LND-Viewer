@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""TW1 Object Exporter v1.0
+"""TW1 Object Exporter v1.1
 Extracts all placed objects from .lnd files and exports per-tile CSVs.
-CSV: MeshName, X, Y, Z, RotX, RotY, RotZ, Scale"""
+CSV: MeshName, X, Y, Z, RotX, RotY, RotZ, Scale
+Supports optional UE4 world coordinate conversion."""
 import struct, os, sys, zlib, re, csv
 
 # ============================================================
@@ -143,6 +144,36 @@ def extract_objects(filepath):
                 pass  # skip malformed entries
     return objects
 
+def parse_grid_position(filename):
+    """Extract grid column and row indices from LND filename.
+    e.g. 'Map_G03.lnd' -> (6, 2), 'Map_A01_1.lnd' -> (0, 0)"""
+    base = os.path.splitext(os.path.basename(filename))[0]
+    m = re.match(r"Map_([A-I])(\d{2})(_1)?$", base, re.IGNORECASE)
+    if not m:
+        return None, None
+    col = ord(m.group(1).upper()) - ord('A')  # A=0 .. I=8
+    row = int(m.group(2)) - 1                  # 01=0 .. 12=11
+    return col, row
+
+def convert_to_ue4(objects, col, row, tile_size_cm, z_scale):
+    """Convert raw TW1 local coordinates to UE4 world coordinates.
+    Returns a new list of dicts with float values formatted to 2 decimals."""
+    tile_origin_x = col * tile_size_cm
+    tile_origin_y = row * tile_size_cm
+    converted = []
+    for o in objects:
+        converted.append({
+            "MeshName": o["MeshName"],
+            "X": f"{tile_origin_x + (o['X'] / 32768.0) * tile_size_cm:.2f}",
+            "Y": f"{tile_origin_y + (o['Y'] / 32768.0) * tile_size_cm:.2f}",
+            "Z": f"{o['Z'] * z_scale:.2f}",
+            "RotX": f"{o['RotX'] * 1.40625:.2f}",
+            "RotY": f"{o['RotY'] * 1.40625:.2f}",
+            "RotZ": f"{o['RotZ'] * 1.40625:.2f}",
+            "Scale": f"{o['Scale'] / 100.0:.2f}",
+        })
+    return converted
+
 def export_csv(objects, filepath):
     """Write objects to CSV."""
     with open(filepath, "w", newline="", encoding="utf-8") as f:
@@ -203,7 +234,7 @@ RED = "#ff5555"; CYAN = "#8be9fd"; PURPLE = "#bd93f9"; YELLOW = "#f1fa8c"
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TW1 Object Exporter v1.0")
+        self.root.title("TW1 Object Exporter v1.1")
         self.root.geometry("800x600")
         self.root.configure(bg=BG)
         self.tiles = {}  # filename -> object list
@@ -225,6 +256,26 @@ class App:
                   font=("Segoe UI", 10, "bold"), bd=0, padx=12,
                   command=self._export_all).pack(side="right", padx=4)
         
+        # UE4 settings bar
+        ue4 = tk.Frame(self.root, bg=BG2, padx=8, pady=4); ue4.pack(fill="x")
+        self.ue4_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ue4, text="Export as UE4 Coordinates", variable=self.ue4_var,
+                        bg=BG2, fg=CYAN, selectcolor=BG3, activebackground=BG2,
+                        activeforeground=CYAN, font=("Segoe UI", 9)
+                        ).pack(side="left")
+        tk.Label(ue4, text="Tile Size (cm):", font=("Segoe UI", 9),
+                 bg=BG2, fg=FG).pack(side="left", padx=(16, 4))
+        self.tile_size_var = tk.StringVar()
+        tk.Entry(ue4, textvariable=self.tile_size_var, width=10, bg=BG3, fg=FG,
+                 insertbackground=FG, font=("Consolas", 9), borderwidth=1,
+                 relief="solid").pack(side="left")
+        tk.Label(ue4, text="Z Scale:", font=("Segoe UI", 9),
+                 bg=BG2, fg=FG).pack(side="left", padx=(16, 4))
+        self.z_scale_var = tk.StringVar()
+        tk.Entry(ue4, textvariable=self.z_scale_var, width=10, bg=BG3, fg=FG,
+                 insertbackground=FG, font=("Consolas", 9), borderwidth=1,
+                 relief="solid").pack(side="left")
+
         # Stats bar
         sb = tk.Frame(self.root, bg=BG3, padx=8, pady=4); sb.pack(fill="x")
         self.stats_lbl = tk.Label(sb, text="", font=("Consolas", 9), bg=BG3, fg=CYAN)
@@ -288,28 +339,59 @@ class App:
     def _export_all(self):
         if not self.tiles:
             messagebox.showinfo("Export", "Load a folder first."); return
-        
+
+        use_ue4 = self.ue4_var.get()
+        tile_size_cm = None
+        z_scale = None
+
+        if use_ue4:
+            ts_str = self.tile_size_var.get().strip()
+            zs_str = self.z_scale_var.get().strip()
+            if not ts_str or not zs_str:
+                messagebox.showerror("UE4 Export",
+                    "Tile Size (cm) and Z Scale must be filled in for UE4 coordinate export.")
+                return
+            try:
+                tile_size_cm = float(ts_str)
+            except ValueError:
+                messagebox.showerror("UE4 Export", "Tile Size (cm) must be a valid number.")
+                return
+            try:
+                z_scale = float(zs_str)
+            except ValueError:
+                messagebox.showerror("UE4 Export", "Z Scale must be a valid number.")
+                return
+
         folder = filedialog.askdirectory(title="Export CSVs to folder")
         if not folder: return
-        
+
         self.status_lbl.config(text="Exporting..."); self.root.update()
         exported = 0
         counts = {"foliage": 0, "static": 0, "interactive": 0}
-        
+
         for fn, objects in sorted(self.tiles.items()):
             if not objects: continue
             base = os.path.splitext(fn)[0]
             foliage, static, interactive = split_by_category(objects)
-            
+
+            # Convert to UE4 coordinates if enabled
+            if use_ue4:
+                col, row = parse_grid_position(fn)
+                if col is not None and row is not None:
+                    foliage = convert_to_ue4(foliage, col, row, tile_size_cm, z_scale)
+                    static = convert_to_ue4(static, col, row, tile_size_cm, z_scale)
+                    interactive = convert_to_ue4(interactive, col, row, tile_size_cm, z_scale)
+
             for cat_name, cat_list in [("foliage", foliage), ("static", static), ("interactive", interactive)]:
                 if not cat_list: continue
                 csv_path = os.path.join(folder, f"{base}_{cat_name}.csv")
                 export_csv(cat_list, csv_path)
                 exported += 1
                 counts[cat_name] += len(cat_list)
-        
+
+        mode = " (UE4)" if use_ue4 else ""
         self.status_lbl.config(
-            text=f"Exported {exported} CSVs — "
+            text=f"Exported {exported} CSVs{mode} — "
                  f"F:{counts['foliage']:,}  S:{counts['static']:,}  I:{counts['interactive']:,}")
 
 if __name__ == "__main__":
