@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""TW1 Object Exporter v1.1
+"""TW1 Object Exporter v1.2
 Extracts all placed objects from .lnd files and exports per-tile CSVs.
 CSV: MeshName, X, Y, Z, RotX, RotY, RotZ, Scale
-Supports optional UE4 world coordinate conversion."""
+Supports optional UE4 world coordinate conversion and mesh variant resolution."""
 import struct, os, sys, zlib, re, csv
 
 # ============================================================
@@ -128,7 +128,7 @@ def extract_objects(filepath):
         txt = data[pos:pos+sl].decode("ascii", errors="replace"); pos += sl
         parts = txt.split()
         if len(parts) >= 12:
-            # [0]Type [1]Mesh [2]Prob [3]Group [4]X [5]Y [6]Z [7]unk [8]RotY [9]RotX [10]RotZ [11]Scale
+            # [0]Type [1]Mesh [2]Prob [3]Group [4]X [5]Y [6]Z [7]unk [8]RotY [9]RotX [10]RotZ [11]Scale [12]Variant
             try:
                 objects.append({
                     "MeshName": parts[1],
@@ -139,10 +139,37 @@ def extract_objects(filepath):
                     "RotY": int(parts[8]),
                     "RotZ": int(parts[10]),
                     "Scale": int(parts[11]),
+                    "Variant": int(parts[12]) if len(parts) >= 13 else 0,
                 })
             except (ValueError, IndexError):
                 pass  # skip malformed entries
     return objects
+
+def load_variant_lookup(script_dir):
+    """Load tw1_variant_lookup.csv and return a dict mapping MeshName to variant info."""
+    lookup = {}
+    csv_path = os.path.join(script_dir, "tw1_variant_lookup.csv")
+    if not os.path.isfile(csv_path):
+        return lookup
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            lookup[row["MeshName"]] = {
+                "pattern": row["VDFPattern"],
+                "range_start": int(row["RangeStart"]),
+                "range_end": int(row["RangeEnd"]),
+            }
+    return lookup
+
+def resolve_variant(mesh_name, variant, lookup):
+    """Resolve mesh variant using lookup table.
+    Returns the resolved mesh name or the original if no lookup entry exists."""
+    if mesh_name not in lookup:
+        return mesh_name
+    entry = lookup[mesh_name]
+    if variant <= 0:
+        variant = entry["range_start"]
+    return entry["pattern"].replace("{V}", str(variant))
 
 def parse_grid_position(filename):
     """Extract grid column and row indices from LND filename.
@@ -162,7 +189,7 @@ def convert_to_ue4(objects, col, row, tile_size_cm, z_scale):
     tile_origin_y = row * tile_size_cm
     converted = []
     for o in objects:
-        converted.append({
+        entry = {
             "MeshName": o["MeshName"],
             "X": f"{tile_origin_x + (o['X'] / 32768.0) * tile_size_cm:.2f}",
             "Y": f"{tile_origin_y + (o['Y'] / 32768.0) * tile_size_cm:.2f}",
@@ -171,7 +198,10 @@ def convert_to_ue4(objects, col, row, tile_size_cm, z_scale):
             "RotY": f"{o['RotY'] * 1.40625:.2f}",
             "RotZ": f"{o['RotZ'] * 1.40625:.2f}",
             "Scale": f"{o['Scale'] / 100.0:.2f}",
-        })
+        }
+        if "Variant" in o:
+            entry["Variant"] = o["Variant"]
+        converted.append(entry)
     return converted
 
 def export_csv(objects, filepath):
@@ -234,7 +264,7 @@ RED = "#ff5555"; CYAN = "#8be9fd"; PURPLE = "#bd93f9"; YELLOW = "#f1fa8c"
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TW1 Object Exporter v1.1")
+        self.root.title("TW1 Object Exporter v1.2")
         self.root.geometry("800x600")
         self.root.configure(bg=BG)
         self.tiles = {}  # filename -> object list
@@ -367,11 +397,17 @@ class App:
 
         self.status_lbl.config(text="Exporting..."); self.root.update()
         exported = 0
+        resolved_count = 0
         counts = {"foliage": 0, "static": 0, "interactive": 0}
+
+        # Load variant lookup table
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        lookup = load_variant_lookup(script_dir)
 
         for fn, objects in sorted(self.tiles.items()):
             if not objects: continue
             base = os.path.splitext(fn)[0]
+            # Categorize on original MeshNames (before variant resolution)
             foliage, static, interactive = split_by_category(objects)
 
             # Convert to UE4 coordinates if enabled
@@ -382,17 +418,27 @@ class App:
                     static = convert_to_ue4(static, col, row, tile_size_cm, z_scale)
                     interactive = convert_to_ue4(interactive, col, row, tile_size_cm, z_scale)
 
+            # Resolve variants and strip Variant key before CSV export
             for cat_name, cat_list in [("foliage", foliage), ("static", static), ("interactive", interactive)]:
                 if not cat_list: continue
+                for obj in cat_list:
+                    if "Variant" in obj:
+                        original = obj["MeshName"]
+                        obj["MeshName"] = resolve_variant(original, obj["Variant"], lookup)
+                        if obj["MeshName"] != original:
+                            resolved_count += 1
+                        del obj["Variant"]
                 csv_path = os.path.join(folder, f"{base}_{cat_name}.csv")
                 export_csv(cat_list, csv_path)
                 exported += 1
                 counts[cat_name] += len(cat_list)
 
         mode = " (UE4)" if use_ue4 else ""
+        variant_info = f" | Resolved {resolved_count:,} variants" if lookup else ""
         self.status_lbl.config(
             text=f"Exported {exported} CSVs{mode} — "
-                 f"F:{counts['foliage']:,}  S:{counts['static']:,}  I:{counts['interactive']:,}")
+                 f"F:{counts['foliage']:,}  S:{counts['static']:,}  I:{counts['interactive']:,}"
+                 f"{variant_info}")
 
 if __name__ == "__main__":
     App()
