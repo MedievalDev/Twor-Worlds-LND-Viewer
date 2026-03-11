@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""TW1 LND Tool v1.0 — Pack/Unpack/View Two Worlds 1 map files (.lnd)
-Full format parser per BugLord spec. Exports binary maps as PNG."""
+"""TW1 LND Map Editor v2.0 — View/Edit/Import/Export Two Worlds 1 map files (.lnd)
+Full format parser per BugLord spec. Import & export binary maps as PNG."""
 import struct, os, sys, re, zlib, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from collections import OrderedDict
@@ -630,6 +630,144 @@ def export_interiors(m, path):
     img.save(path)
     return img
 
+# ============================================================
+# IMAGE IMPORT — Replace map data from PNG
+# ============================================================
+def _validate_import_dims(img, expected_w, expected_h, label):
+    """Validate imported image dimensions match the map."""
+    if img.width != expected_w or img.height != expected_h:
+        raise ValueError(
+            f"{label}: Image is {img.width}x{img.height}, "
+            f"but map expects {expected_w}x{expected_h}")
+
+def import_heightmap(m, path):
+    """Import heightmap from 16-bit or 8-bit grayscale PNG."""
+    hm = m["heightmap"]
+    img = Image.open(path)
+    _validate_import_dims(img, hm["w"], hm["h"], "Heightmap")
+    arr = np.array(img)
+    if arr.dtype == np.uint16:
+        data = arr.astype(np.uint16)
+    elif arr.dtype == np.uint8:
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]
+        data = (arr.astype(np.uint16) * 257)  # scale 0-255 → 0-65535
+    else:
+        data = arr.astype(np.uint16)
+    m["heightmap"]["data"] = data.tobytes()
+
+def import_color_base(m, path):
+    """Import color base from RGBA PNG → stored as BGRA."""
+    cb = m["color_base"]
+    img = Image.open(path).convert("RGBA")
+    _validate_import_dims(img, cb["w"], cb["h"], "Color Base")
+    arr = np.array(img)
+    bgra = arr[:, :, [2, 1, 0, 3]]  # RGBA → BGRA
+    m["color_base"]["data"] = bgra.tobytes()
+
+def import_tex_ref(m, path):
+    """Import texture reference map from RGBA PNG."""
+    tr = m["tex_ref_map"]
+    img = Image.open(path).convert("RGBA")
+    _validate_import_dims(img, tr["w"], tr["h"], "Tex Reference")
+    arr = np.array(img)
+    m["tex_ref_map"]["data"] = arr.tobytes()
+
+def import_tex_alpha(m, path):
+    """Import texture alpha map from RGBA PNG."""
+    ta = m["tex_alpha_map"]
+    img = Image.open(path).convert("RGBA")
+    _validate_import_dims(img, ta["w"], ta["h"], "Tex Alpha")
+    arr = np.array(img)
+    m["tex_alpha_map"]["data"] = arr.tobytes()
+
+def import_water_farlod(m, path):
+    """Import water FarLOD from grayscale PNG → uint16."""
+    wf = m["water_farlod"]
+    img = Image.open(path)
+    _validate_import_dims(img, wf["w"], wf["h"], "Water FarLOD")
+    arr = np.array(img)
+    if arr.dtype == np.uint16:
+        data = arr
+    elif arr.dtype == np.uint8:
+        if arr.ndim == 3: arr = arr[:, :, 0]
+        data = (arr.astype(np.uint16) * 257)
+    else:
+        data = arr.astype(np.uint16)
+    m["water_farlod"]["data"] = data.tobytes()
+
+def import_fog_ref(m, path):
+    """Import fog reference from grayscale PNG → uint16."""
+    fr = m["fog_ref_map"]
+    img = Image.open(path)
+    _validate_import_dims(img, fr["w"], fr["h"], "Fog Reference")
+    arr = np.array(img)
+    if arr.dtype == np.uint16:
+        data = arr
+    elif arr.dtype == np.uint8:
+        if arr.ndim == 3: arr = arr[:, :, 0]
+        data = (arr.astype(np.uint16) * 257)
+    else:
+        data = arr.astype(np.uint16)
+    m["fog_ref_map"]["data"] = data.tobytes()
+
+def import_eax(m, path):
+    """Import EAX map from grayscale PNG → uint8."""
+    em = m["eax_map"]
+    img = Image.open(path).convert("L")
+    _validate_import_dims(img, em["w"], em["h"], "EAX Map")
+    arr = np.array(img, dtype=np.uint8)
+    m["eax_map"]["data"] = arr.tobytes()
+
+def import_flower_grass(m, path):
+    """Import flower/grass from RGB PNG → update density channels (bytes 15,17,19)."""
+    fg = m["flower_grass"]
+    img = Image.open(path).convert("RGB")
+    _validate_import_dims(img, fg["w"], fg["h"], "Flower/Grass")
+    rgb = np.array(img, dtype=np.uint8)
+    raw = np.frombuffer(fg["data"], dtype=np.uint8).reshape(fg["h"], fg["w"], 21).copy()
+    raw[:, :, 1] = rgb[:, :, 0]   # ref1 channel
+    raw[:, :, 2] = rgb[:, :, 1]   # ref2 channel
+    raw[:, :, 0] = rgb[:, :, 2]   # byte0
+    m["flower_grass"]["data"] = raw.tobytes()
+
+def import_stamp_map(m, path):
+    """Import stamp map from RGB PNG → update first 3 bytes per cell."""
+    sm = m["stamp_map"]
+    img = Image.open(path).convert("RGB")
+    _validate_import_dims(img, sm["w"], sm["h"], "Stamp Map")
+    rgb = np.array(img, dtype=np.uint8)
+    raw = np.frombuffer(sm["data"], dtype=np.uint8).reshape(sm["h"], sm["w"], 16).copy()
+    raw[:, :, :3] = rgb
+    m["stamp_map"]["data"] = raw.tobytes()
+
+def import_passable(m, path):
+    """Import passable terrain from grayscale PNG → uint32 (>0 = passable)."""
+    pt = m["passable"]
+    img = Image.open(path).convert("L")
+    _validate_import_dims(img, pt["w"], pt["h"], "Passable")
+    arr = np.array(img, dtype=np.uint8)
+    data = (arr > 0).astype(np.uint32)
+    m["passable"]["data"] = data.tobytes()
+
+def import_disabled(m, path):
+    """Import disabled terrain from grayscale PNG → uint32 (>0 = disabled)."""
+    dt = m["disabled"]
+    img = Image.open(path).convert("L")
+    _validate_import_dims(img, dt["w"], dt["h"], "Disabled")
+    arr = np.array(img, dtype=np.uint8)
+    data = (arr > 0).astype(np.uint32)
+    m["disabled"]["data"] = data.tobytes()
+
+def import_interiors(m, path):
+    """Import interiors from grayscale PNG → uint32 (>0 = interior)."""
+    it = m["interiors"]
+    img = Image.open(path).convert("L")
+    _validate_import_dims(img, it["w"], it["h"], "Interiors")
+    arr = np.array(img, dtype=np.uint8)
+    data = (arr > 0).astype(np.uint32)
+    m["interiors"]["data"] = data.tobytes()
+
 def export_all_maps(m, out_dir):
     """Export all binary maps as PNGs. Returns list of (name, path, img)."""
     os.makedirs(out_dir, exist_ok=True)
@@ -665,7 +803,7 @@ def export_all_maps(m, out_dir):
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TW1 LND Tool v1.0")
+        self.root.title("TW1 LND Map Editor v2.0")
         self.root.geometry("1280x800")
         self.root.configure(bg=BG)
         self.root.minsize(900, 600)
@@ -681,12 +819,15 @@ class App:
 
     def _build_ui(self):
         tb = tk.Frame(self.root, bg=BG2, padx=8, pady=6); tb.pack(fill="x")
-        tk.Label(tb, text="TW1 LND Tool v1.0", font=("Segoe UI", 12, "bold"),
+        tk.Label(tb, text="TW1 LND Map Editor v2.0", font=("Segoe UI", 12, "bold"),
                  bg=BG2, fg=GREEN).pack(side="left")
         self.status_lbl = tk.Label(tb, text="", font=("Segoe UI", 9), bg=BG2, fg=ORANGE)
         self.status_lbl.pack(side="left", padx=12)
         tk.Button(tb, text="Export All PNGs", bg=PURPLE, fg="#fff", font=("Segoe UI", 10, "bold"),
                   bd=0, padx=10, command=self._export_all).pack(side="right", padx=4)
+        tk.Button(tb, text="Save As", bg=CYAN, fg="#000",
+                  font=("Segoe UI", 10, "bold"), bd=0, padx=10,
+                  command=self._save_as).pack(side="right", padx=4)
         self.save_btn = tk.Button(tb, text="Save", bg=GREEN, fg="#000",
                   font=("Segoe UI", 10, "bold"), bd=0, padx=12, command=self._save_file)
         self.save_btn.pack(side="right", padx=4)
@@ -734,6 +875,22 @@ class App:
             messagebox.showerror("Error", f"Save failed:\n{e}")
             import traceback; traceback.print_exc()
 
+    def _save_as(self):
+        if not self.m: return
+        p = filedialog.asksaveasfilename(
+            title="Save LND As", defaultextension=".lnd",
+            filetypes=[("LND files", "*.lnd")])
+        if not p: return
+        try:
+            sz = write_lnd(p, self.m)
+            self.filepath = p
+            self.modified = False
+            self._update_title()
+            self.status_lbl.config(text=f"Saved as {os.path.basename(p)}! {sz:,} bytes")
+        except Exception as e:
+            messagebox.showerror("Error", f"Save failed:\n{e}")
+            import traceback; traceback.print_exc()
+
     def _export_all(self):
         if not self.m: return
         d = filedialog.askdirectory(title="Export PNGs to folder")
@@ -746,7 +903,7 @@ class App:
 
     def _do_load(self, path):
         try:
-            self.root.title("TW1 LND Tool v1.0 — Loading...")
+            self.root.title("TW1 LND Map Editor v2.0 — Loading...")
             self.root.update()
             self.m = parse_lnd(path)
             self.filepath = path
@@ -767,7 +924,7 @@ class App:
     def _update_title(self):
         name = os.path.basename(self.filepath) if self.filepath else "?"
         pfx = "* " if self.modified else ""
-        self.root.title(f"{pfx}TW1 LND Tool v1.0 — {name}")
+        self.root.title(f"{pfx}TW1 LND Map Editor v2.0 — {name}")
 
     def _mark_modified(self):
         self.modified = True; self._update_title()
@@ -864,10 +1021,12 @@ class App:
     def _show_welcome(self):
         self._clear()
         f = tk.Frame(self.detail, bg=BG); f.pack(expand=True)
-        tk.Label(f, text="TW1 LND Tool", font=("Segoe UI", 20, "bold"), bg=BG, fg=FG).pack(pady=(40, 8))
-        tk.Label(f, text="Two Worlds 1 Map File — Pack / Unpack / View", font=("Segoe UI", 12), bg=BG, fg=FG_DIM).pack()
-        tk.Label(f, text="Export binary maps as PNG • Edit properties • Repack",
-                 font=("Segoe UI", 11), bg=BG, fg=CYAN).pack(pady=(4, 20))
+        tk.Label(f, text="TW1 LND Map Editor", font=("Segoe UI", 20, "bold"), bg=BG, fg=FG).pack(pady=(40, 8))
+        tk.Label(f, text="Two Worlds 1 Map File — View / Edit / Import / Export", font=("Segoe UI", 12), bg=BG, fg=FG_DIM).pack()
+        tk.Label(f, text="Import & export maps as PNG • Swap heightmaps, color maps, etc. • Save modified LND",
+                 font=("Segoe UI", 11), bg=BG, fg=CYAN).pack(pady=(4, 8))
+        tk.Label(f, text="Select a map layer in the tree, then use Import PNG to replace it",
+                 font=("Segoe UI", 10), bg=BG, fg=ORANGE).pack(pady=(0, 20))
 
     def _show_stats(self):
         self._show_info()
@@ -1041,7 +1200,7 @@ class App:
                      font=("Segoe UI", fs-1), bg=BG, fg=FG_DIM).pack(pady=8)
 
     def _show_map_preview(self, key, label):
-        """Show map preview with export button."""
+        """Show map preview with export and import buttons."""
         self._clear(); m = self.m; fs = self.font_size
         # Map key to export function
         export_map = {
@@ -1051,6 +1210,15 @@ class App:
             "flower_grass": export_flower_grass, "stamp_map": export_stamp_map,
             "eax_map": export_eax, "passable": export_passable,
             "disabled": export_disabled, "interiors": export_interiors,
+        }
+        # Map key to import function
+        import_map = {
+            "heightmap": import_heightmap, "color_base": import_color_base,
+            "tex_ref": import_tex_ref, "tex_alpha": import_tex_alpha,
+            "water_farlod": import_water_farlod, "fog_ref": import_fog_ref,
+            "flower_grass": import_flower_grass, "stamp_map": import_stamp_map,
+            "eax_map": import_eax, "passable": import_passable,
+            "disabled": import_disabled, "interiors": import_interiors,
         }
         # Map key to data key
         data_map = {
@@ -1082,8 +1250,31 @@ class App:
                 except Exception as e:
                     messagebox.showerror("Export Error", str(e))
 
-        tk.Button(hdr, text="Export PNG", bg=PURPLE, fg="#fff", font=("Segoe UI", 9, "bold"),
-                  bd=0, padx=10, command=_export).pack(side="right")
+        def _import():
+            p = filedialog.askopenfilename(title=f"Import {label} from PNG",
+                filetypes=[("PNG", "*.png"), ("All images", "*.png;*.bmp;*.tga;*.tiff")])
+            if not p: return
+            fn = import_map.get(key)
+            if not fn:
+                messagebox.showwarning("Import", f"Import not supported for {label}")
+                return
+            try:
+                fn(m, p)
+                self._mark_modified()
+                self.status_lbl.config(text=f"Imported {label} from {os.path.basename(p)}")
+                # Refresh preview
+                self._show_map_preview(key, label)
+            except Exception as e:
+                messagebox.showerror("Import Error", str(e))
+
+        btn_frame = tk.Frame(hdr, bg=BG3)
+        btn_frame.pack(side="right")
+        tk.Button(btn_frame, text="Import PNG", bg=ORANGE, fg="#000",
+                  font=("Segoe UI", 9, "bold"), bd=0, padx=10,
+                  command=_import).pack(side="right", padx=4)
+        tk.Button(btn_frame, text="Export PNG", bg=PURPLE, fg="#fff",
+                  font=("Segoe UI", 9, "bold"), bd=0, padx=10,
+                  command=_export).pack(side="right")
 
         if not HAS_PIL or w == 0 or h == 0:
             tk.Label(self.detail, text="No preview (Pillow required or empty map)",
